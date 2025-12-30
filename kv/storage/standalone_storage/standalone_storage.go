@@ -1,50 +1,49 @@
 package standalone_storage
 
 import (
+	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
+	"path"
 )
 
 // StandAloneStorage is an implementation of `Storage` for a single-node TinyKV instance. It does not
 // communicate with other nodes and all data is stored locally.
 type StandAloneStorage struct {
-    engine *engine_util.Engines
-    config *config.Config
-}
-
-func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
-	kvPath := conf.DBPath + "/kv"
-    raftPath := conf.DBPath + "/raft"
-    kvEngine := engine_util.CreateDB(kvPath)
-    raftEngine := engine_util.CreateDB(raftPath)
-    
-    store := StandAloneStorage{
-        engine: engine_util.NewEngines(kvEngine, raftEngine, kvPath, raftPath),
-        config: conf,
-    }
-    return &store
+	// Your Data Here (1).
+	// 定义engine和conf
+	engine *engine_util.Engines
+	config *config.Config
 }
 
 type StandAloneReader struct {
-    kvTxn *badger.Txn
+	kvTxn *badger.Txn
 }
 
-func (s *StandAloneReader) GetCF(cf string, key []byte) ([]byte, error){
-	value, err := engine_util.GetCFFromTxn(s.kvTxn,cf,key)
-	if err == badger.ErrKeyNotFound {
-		return nil, nil
+func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
+	// Your Code Here (1).
+	// dbPath直接从conf中取就行
+	dbPath := conf.DBPath
+	kvPath := path.Join(dbPath,"kv")
+	raftPath := path.Join(dbPath, "raft")
+
+	// 创建磁盘目录与DB对象
+	kvEngine := engine_util.CreateDB(kvPath,false)
+	raftEngine := engine_util.CreateDB(raftPath, true)
+
+	store := StandAloneStorage{
+		engine: engine_util.NewEngines(kvEngine,raftEngine,kvPath,raftPath),
+		config: conf,
 	}
-	return value,err
+	return &store
 }
 
-func (s *StandAloneReader) IterCF(cf string) engine_util.DBIterator{
-	return engine_util.NewCFIterator(cf,s.kvTxn)
-}
-
-func (s *StandAloneReader) Close() {
-	s.kvTxn.Discard()
-	return
+func NewStandAloneReader(kvTxn *badger.Txn) *StandAloneReader {
+	return &StandAloneReader{
+		kvTxn: kvTxn,
+	}
 }
 
 func (s *StandAloneStorage) Start() error {
@@ -54,26 +53,65 @@ func (s *StandAloneStorage) Start() error {
 
 func (s *StandAloneStorage) Stop() error {
 	// Your Code Here (1).
-	return nil
+	return s.engine.Close()
 }
 
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	txn := s.engine.Kv.NewTransaction(false) // 只读事务
-    return &StandAloneReader{kvTxn: txn}, nil
+	// Your Code Here (1).
+	// 初始化txn
+	kvTxn := s.engine.Kv.NewTransaction(false)
+	return NewStandAloneReader(kvTxn), nil
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
-	for _, b := range batch {
-        switch data := b.Data.(type) {
-        case storage.Put:
-            if err := engine_util.PutCF(s.engine.Kv, data.Cf, data.Key, data.Value); err != nil {
-                return err
-            }
-        case storage.Delete:
-            if err := engine_util.DeleteCF(s.engine.Kv, data.Cf, data.Key); err != nil {
-                return err
-            }
-        }
-    }
-    return nil
+	// Your Code Here (1).
+	// 根据 modify 选择性调用 PutCF 或 DeleteCF
+	for _,b := range batch {
+		switch b.Data.(type) {
+		case storage.Put:
+			put := b.Data.(storage.Put)
+			key := put.Key
+			value := put.Value
+			cf := put.Cf
+			err := engine_util.PutCF(s.engine.Kv,cf,key,value)
+			if err != nil{
+				return err
+			}
+			break
+		case storage.Delete:
+			del := b.Data.(storage.Delete)
+			key := del.Key
+			cf := del.Cf
+			err := engine_util.DeleteCF(s.engine.Kv,cf,key)
+			if err != nil{
+				return nil
+			}
+			break
+		}
+	}
+	return nil
+}
+
+/**
+	实现StorageReader接口
+ */
+
+func (s *StandAloneReader) GetCF(cf string, key []byte) ([]byte, error){
+	value, err := engine_util.GetCFFromTxn(s.kvTxn,cf,key)
+	// key 不存在
+	if err == badger.ErrKeyNotFound {
+		return nil, nil  // 测试要求 err 为 nil，而不是 KeyNotFound，否则没法过
+	}
+	return value,err
+}
+
+func (s *StandAloneReader) IterCF(cf string) engine_util.DBIterator{
+	// 直接用现有的
+	return engine_util.NewCFIterator(cf,s.kvTxn)
+}
+
+func (s *StandAloneReader) Close() {
+	// 关闭 txn，和 commit 对应
+	s.kvTxn.Discard()
+	return
 }
